@@ -10,7 +10,7 @@
 
 ## 📖 Overview
 
-![Project Demo](./assets/demo-screenshot.png)
+![Project Demo](./assets/medi-link.png)
 
 **Medi-Link** is an end-to-end AI system designed to bridge the gap between complex medical data and patient understanding. It ingests raw medical documents (PDFs/Images), digitizes them using OCR, and utilizes a **Multi-Agent RAG System** to provide safe, context-aware health summaries.
 
