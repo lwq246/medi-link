@@ -1,69 +1,81 @@
 import os
 from dotenv import load_dotenv
-from huggingface_hub import InferenceClient
+from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
-load_dotenv()  # loads .env
+# Load environment variables
+load_dotenv()
 
+# 1. Configuration
 TOKEN = os.getenv("HF_TOKEN")
 MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
 
-client = InferenceClient(token=TOKEN)
+# 2. Initialize the LLM & Chat Wrapper
+# We still use the Endpoint, but we wrap it in ChatHuggingFace to fix the "Task" error
+raw_llm = HuggingFaceEndpoint(
+    repo_id=MODEL_ID,
+    # We remove task="text-generation" to let it auto-detect or use the Chat wrapper
+    huggingfacehub_api_token=TOKEN,
+    max_new_tokens=512,
+    temperature=0.2,
+)
 
-def query_huggingface(messages):
-    print(f"Connecting to {MODEL_ID}...")
-    try:
-        response = client.chat_completion(
-            model=MODEL_ID,
-            messages=messages,
-            max_tokens=500,
-            temperature=0.2
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"❌ API Error: {e}")
-        return None
+# This wrapper forces LangChain to use the "conversational" (Chat) API
+llm = ChatHuggingFace(llm=raw_llm)
+
+# 3. Updated Prompt Templates (Using System/Human message structure for Chat Models)
+analysis_prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a professional medical AI assistant. Analyze the results against guidelines."),
+    ("human", "PATIENT REPORT: {patient_text}\n\nMEDICAL GUIDELINES: {medical_context}\n\nSummarize the findings and highlight abnormal values.")
+])
+
+chat_prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful and knowledgeable medical assistant."),
+    ("human", "CONTEXT: {context}\n\nQUESTION: {question}")
+])
+
+# 4. Create the Chains
+analysis_chain = analysis_prompt | llm | StrOutputParser()
+chat_chain = chat_prompt | llm | StrOutputParser()
 
 # === AGENT 1: REPORT ANALYZER ===
 def run_multi_agent_system(patient_text, medical_context):
-    print("Running Analysis Agent...")
+    print(f"Connecting to {MODEL_ID} via Conversational API...")
     
-    messages = [
-        {"role": "system", "content": "You are a medical AI assistant. Summarize the text using the provided guidelines."},
-        {"role": "user", "content": f"Patient Text: {patient_text}\n\nGuidelines: {medical_context}\n\nSummary:"}
-    ]
+    # Context-level Truncation for Safety
+    safe_patient_text = patient_text[:3000] if patient_text else "No data."
+    safe_medical_context = medical_context[:1500] if medical_context else "No context."
 
-    result = query_huggingface(messages)
-    
-    if result:
+    try:
+        result = analysis_chain.invoke({
+            "patient_text": safe_patient_text,
+            "medical_context": safe_medical_context
+        })
         return result
-            
-    # Reliable Fallback
-    return (
-        "⚠️ [OFFLINE MODE]\n"
-        "AI unavailable. Please compare the patient values manually against the reference ranges."
-    )
+    except Exception as e:
+        print(f"❌ API Error in Analysis: {e}")
+        return (
+            "⚠️ [OFFLINE MODE]\n"
+            "AI unavailable. Please compare the patient values manually against the reference ranges."
+        )
 
 # === AGENT 2: CHATBOT ===
 def run_chat_agent(question, context):
-    print("Running Chat Agent...")
+    print(f"Connecting to {MODEL_ID} for Chat Q&A...")
     
-    safe_context = context if context else "No context provided."
-    
-    messages = [
-        {"role": "system", "content": "You are a helpful medical assistant."},
-        {"role": "user", "content": f"Context: {safe_context}\n\nQuestion: {question}"}
-    ]
+    safe_context = context[:3000] if context else "No context."
 
-    result = query_huggingface(messages)
-    
-    if result:
+    try:
+        result = chat_chain.invoke({
+            "context": safe_context,
+            "question": question
+        })
         return result
-            
-    return "I am currently offline. Please check your internet connection."
+    except Exception as e:
+        print(f"❌ API Error in Chat: {e}")
+        return "I am currently offline. Please check your internet connection."
 
-# === TEST IT IMMEDIATELY ===
 if __name__ == "__main__":
-    print("Testing Non-Gated Model...")
-    test_response = run_chat_agent("Hello", "")
-    print(f"\nFinal Result: {test_response}")
-
+    # Quick Test
+    print(run_chat_agent("Hello", "No context"))
