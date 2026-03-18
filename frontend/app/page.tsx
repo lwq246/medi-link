@@ -95,6 +95,7 @@ export default function Home() {
             📝 AI Analysis
           </h2>
           <div className="p-4 bg-blue-50 rounded-lg border border-blue-100 text-gray-800 whitespace-pre-wrap leading-relaxed">
+            {/* FIX: Use correct key from backend */}
             {extractedData.ai_analysis}
           </div>
         </div>

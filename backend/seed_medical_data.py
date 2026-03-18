@@ -4,7 +4,7 @@ from sentence_transformers import SentenceTransformer
 import uuid
 
 # 1. Connect to Qdrant
-client = QdrantClient(host="localhost", port=6333)
+client = QdrantClient(host="localhost", port=6335)
 COLLECTION_NAME = "medical_knowledge"
 
 # 2. Load a lightweight AI Model (Hugging Face)
