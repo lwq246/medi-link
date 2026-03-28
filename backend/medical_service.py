@@ -1,75 +1,172 @@
 import os
+import json
+import re
+import base64
+from typing import TypedDict, List, Optional, Union
 from dotenv import load_dotenv
-from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
+from huggingface_hub import InferenceClient
+from langgraph.graph import StateGraph, END
+import google.generativeai as genai
 
 # Load environment variables
 load_dotenv()
 
-# 1. Configuration
+# --- INITIALIZE CLIENTS ---
+# 1. Hugging Face (For Formatter and Chat)
 TOKEN = os.getenv("HF_TOKEN")
-MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
+FORMATTER_MODEL = "Qwen/Qwen2.5-7B-Instruct" # Upgraded to 72B for better summary logic
+hf_client = InferenceClient(api_key=TOKEN)
 
-# 2. Initialize the LLM & Chat Wrapper
-# We still use the Endpoint, but we wrap it in ChatHuggingFace to fix the "Task" error
-raw_llm = HuggingFaceEndpoint(
-    repo_id=MODEL_ID,
-    # We remove task="text-generation" to let it auto-detect or use the Chat wrapper
-    huggingfacehub_api_token=TOKEN,
-    max_new_tokens=512,
-    temperature=0.2,
-)
+# 2. Google Gemini (For Vision Extraction)
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+gemini_model = genai.GenerativeModel('gemini-2.5-flash')
 
-# This wrapper forces LangChain to use the "conversational" (Chat) API
-llm = ChatHuggingFace(llm=raw_llm)
+# --- STATE DEFINITION ---
+class LabMarker(TypedDict):
+    name: str
+    value: Optional[float]
+    min_range: Optional[float]
+    max_range: Optional[float]
+    unit: str
+    status: Optional[str]
 
-# 3. Updated Prompt Templates (Using System/Human message structure for Chat Models)
-analysis_prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a professional medical AI assistant. Analyze the results against guidelines."),
-    ("human", "PATIENT REPORT: {patient_text}\n\nMEDICAL GUIDELINES: {medical_context}\n\nSummarize the findings and highlight abnormal values.")
-])
+class AgentState(TypedDict):
+    image_base64: str       
+    medical_context: str    
+    structured_data: List[LabMarker]
+    final_report: str
 
-chat_prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful and knowledgeable medical assistant."),
-    ("human", "CONTEXT: {context}\n\nQUESTION: {question}")
-])
-
-# 4. Create the Chains
-analysis_chain = analysis_prompt | llm | StrOutputParser()
-chat_chain = chat_prompt | llm | StrOutputParser()
-
-def analyze_patient_report(patient_text, medical_context):
-    print(f"Connecting to {MODEL_ID} via Conversational API...")
-    # Context-level Truncation for Safety
-    safe_patient_text = patient_text[:3000] if patient_text else "No data."
-    safe_medical_context = medical_context[:1500] if medical_context else "No context."
+# --- UTILS ---
+def clean_to_float(value):
+    if value is None: return None
     try:
-        result = analysis_chain.invoke({
-            "patient_text": safe_patient_text,
-            "medical_context": safe_medical_context
-        })
-        return result
+        # Extract only numbers and decimals (removes units like 'mg/dL')
+        match = re.search(r"[-+]?\d*\.\d+|\d+", str(value))
+        return float(match.group()) if match else None
+    except: return None
+
+# --- NODE 1: THE VISION EXTRACTOR (GEMINI) ---
+def vision_extractor_node(state: AgentState):
+    print("--- Agent 1: Gemini Vision Extraction (Stable) ---")
+    
+    prompt = (
+        "Extract every lab marker from this medical report image into a JSON object.\n"
+        "FIELDS: 'name', 'value', 'min_range', 'max_range', and 'unit'.\n"
+        "RULES:\n"
+        "1. Provide ONLY pure numbers for value and ranges.\n"
+        "2. If a range is '< 1.2', set min_range to 0 and max_range to 1.2.\n"
+        "3. Output ONLY valid JSON in this format: {\"markers\": [{\"name\": \"...\", \"value\": 10.5, ...}]}"
+    )
+
+    try:
+        # Gemini handles Base64 images directly
+        response = gemini_model.generate_content([
+            prompt,
+            {'mime_type': 'image/jpeg', 'data': state['image_base64']}
+        ])
+        
+        # Clean markdown if Gemini adds it
+        raw_text = response.text
+        clean_json = re.sub(r"```json\n|\n```", "", raw_text).strip()
+        data = json.loads(clean_json)
+        
+        extracted = data.get("markers", [])
+        print(f"Successfully extracted {len(extracted)} markers via Gemini.")
+        return {"structured_data": extracted}
+        
     except Exception as e:
-        print(f"❌ API Error in Analysis: {e}")
-        return (
-            "⚠️ [OFFLINE MODE]\n"
-            "AI unavailable. Please compare the patient values manually against the reference ranges."
-        )
+        print(f"❌ Gemini Vision Error: {e}")
+        return {"structured_data": []}
+
+# --- NODE 2: THE AUDITOR (PYTHON CODE) ---
+def auditor_node(state: AgentState):
+    print("--- Agent 2: Deterministic Math Audit ---")
+    markers = state["structured_data"]
+    
+    for m in markers:
+        val = clean_to_float(m.get("value"))
+        low = clean_to_float(m.get("min_range"))
+        high = clean_to_float(m.get("max_range"))
+        
+        if val is None:
+            m["status"] = "❓ N/A"
+        elif low is not None and val < low:
+            m["status"] = "🚩 Low"
+        elif high is not None and val > high:
+            m["status"] = "🚩 High"
+        else:
+            m["status"] = "✅ Normal"
+            
+    return {"structured_data": markers}
+
+# --- NODE 3: THE FORMATTER (HUGGING FACE) ---
+def formatter_node(state: AgentState):
+    print(f"--- Agent 3: Clinical Analysis ({FORMATTER_MODEL}) ---")
+    
+    json_summary = json.dumps(state["structured_data"], indent=2, ensure_ascii=False)
+    
+    prompt = (
+        "You are a SKEPTICAL Clinical Auditor. Report the data with absolute accuracy.\n\n"
+        "LOGIC RULES:\n"
+        "1. LOOK at the 'status' provided in the JSON data.\n"
+        "2. If status is '✅ Normal', you are FORBIDDEN from explaining it in the Observations.\n"
+        "3. Check for Contradictions: If RBC is High but HGB/HCT are Normal, call it a 'Biological Inconsistency'.\n"
+        "4. Output format: Table first, then '### 🔎 Observations' for 🚩 items, then '### 🩺 Final Summary'.\n\n"
+        f"VERIFIED DATA:\n{json_summary}\n\n"
+        f"CLINICAL GUIDELINES:\n{state['medical_context']}"
+    )
+
+    try:
+        response = hf_client.chat.completions.create(
+            model=FORMATTER_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=2500,
+            temperature=0.1
+        ).choices[0].message.content
+
+        return {"final_report": response}
+    except Exception as e:
+        print(f"Formatter Error: {e}")
+        return {"final_report": "Error generating clinical insights."}
+
+# --- BUILD THE GRAPH ---
+workflow = StateGraph(AgentState)
+
+workflow.add_node("vision_extractor", vision_extractor_node)
+workflow.add_node("auditor", auditor_node)
+workflow.add_node("formatter", formatter_node)
+
+workflow.set_entry_point("vision_extractor")
+workflow.add_edge("vision_extractor", "auditor")
+workflow.add_edge("auditor", "formatter")
+workflow.add_edge("formatter", END)
+
+medical_app = workflow.compile()
+
+# --- PUBLIC FUNCTIONS ---
+
+# In medical_service.py
+def analyze_patient_report(image_base64, medical_context):
+    result = medical_app.invoke({
+        "image_base64": image_base64,
+        "medical_context": medical_context,
+        "structured_data": [],
+        "final_report": ""
+    })
+    # CHANGE THIS: Return both the text and the markers list
+    return result["final_report"], result["structured_data"]
 
 def answer_medical_question(question, context):
-    print(f"Connecting to {MODEL_ID} for Chat Q&A...")
-    safe_context = context[:3000] if context else "No context."
+    """Triggered by the FastAPI /chat route"""
     try:
-        result = chat_chain.invoke({
-            "context": safe_context,
-            "question": question
-        })
-        return result
+        completion = hf_client.chat.completions.create(
+            model=FORMATTER_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful medical assistant. Use the context provided."},
+                {"role": "user", "content": f"CONTEXT: {context}\n\nQUESTION: {question}"}
+            ],
+            max_tokens=800
+        )
+        return completion.choices[0].message.content
     except Exception as e:
-        print(f"❌ API Error in Chat: {e}")
-        return "I am currently offline. Please check your internet connection."
-
-if __name__ == "__main__":
-    # Quick Test
-    print(answer_medical_question("Hello", "No context"))
+        return f"I'm sorry, I'm having trouble responding. Error: {str(e)}"

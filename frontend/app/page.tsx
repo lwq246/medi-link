@@ -1,153 +1,96 @@
 "use client";
-import { useState } from "react";
+import { supabase } from "@/lib/supabase";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 
-export default function Home() {
-  const [status, setStatus] = useState("Ready");
-  const [extractedData, setExtractedData] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
+export default function LandingPage() {
+  const router = useRouter();
+  const [loading, setLoading] = useState(true);
 
-  // Chat State
-  const [question, setQuestion] = useState("");
-  const [chatHistory, setChatHistory] = useState<
-    { role: string; text: string }[]
-  >([]);
-  const [chatLoading, setChatLoading] = useState(false);
+  // SMART REDIRECT: If logged in, go straight to Dashboard
+  useEffect(() => {
+    const checkUser = async () => {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (session) {
+        router.push("/dashboard");
+      } else {
+        setLoading(false);
+      }
+    };
+    checkUser();
+  }, [router]);
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files?.[0]) return;
-    setLoading(true);
-    setStatus("Uploading & Analyzing...");
-
-    const formData = new FormData();
-    formData.append("file", e.target.files[0]);
-
-    try {
-      const res = await fetch("http://localhost:8000/upload", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-      setExtractedData(data);
-      setStatus("Analysis Complete ✅");
-    } catch (err) {
-      console.error(err);
-      setStatus("Error ❌");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleChat = async () => {
-    if (!question) return;
-
-    // Add user message to history
-    const newHistory = [...chatHistory, { role: "user", text: question }];
-    setChatHistory(newHistory);
-    setChatLoading(true);
-    setQuestion(""); // Clear input
-
-    try {
-      const res = await fetch("http://localhost:8000/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: question }),
-      });
-      const data = await res.json();
-
-      // Add bot response
-      setChatHistory([...newHistory, { role: "bot", text: data.answer }]);
-    } catch (err) {
-      setChatHistory([
-        ...newHistory,
-        { role: "bot", text: "Error connecting to AI." },
-      ]);
-    } finally {
-      setChatLoading(false);
-    }
-  };
+  if (loading)
+    return (
+      <div className="h-screen flex items-center justify-center">
+        Loading...
+      </div>
+    );
 
   return (
-    <div className="flex min-h-screen flex-col items-center p-12 bg-slate-50 font-sans">
-      <h1 className="text-4xl font-bold text-blue-900 mb-8">
-        Medi-Link AI Platform
-      </h1>
+    <div className="min-h-screen bg-white font-sans text-slate-900">
+      {/* Navigation */}
+      <nav className="flex justify-between items-center p-6 max-w-7xl mx-auto">
+        <h1 className="text-2xl font-bold text-blue-900">Medi-Link AI</h1>
+        <Link
+          href="/login"
+          className="bg-blue-900 text-white px-6 py-2 rounded-full font-semibold hover:bg-blue-800 transition"
+        >
+          Sign In
+        </Link>
+      </nav>
 
-      {/* 1. UPLOAD SECTION */}
-      <div className="w-full max-w-2xl bg-white p-6 rounded-xl shadow-md mb-8">
-        <label className="font-bold text-gray-700">
-          1. Upload Medical Report
-        </label>
-        <input
-          type="file"
-          accept=".pdf,.jpg,.png"
-          onChange={handleFileUpload}
-          className="block w-full mt-2 text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-        />
-        {loading && (
-          <p className="mt-2 text-blue-600 animate-pulse">{status}</p>
-        )}
-      </div>
+      {/* Hero Section */}
+      <header className="flex flex-col items-center text-center mt-20 px-6">
+        <h2 className="text-5xl md:text-6xl font-extrabold text-blue-900 mb-6 leading-tight">
+          Understand Your Medical <br /> Reports in Seconds.
+        </h2>
+        <p className="text-xl text-slate-600 max-w-2xl mb-10 leading-relaxed">
+          Upload blood tests, MRI results, or any medical document. Our AI
+          identifies abnormal values and explains your health in simple
+          language.
+        </p>
+        <Link
+          href="/login"
+          className="bg-blue-600 text-white px-10 py-4 rounded-xl text-lg font-bold shadow-lg hover:bg-blue-700 transition transform hover:scale-105"
+        >
+          Get Started for Free
+        </Link>
+      </header>
 
-      {/* 2. RESULTS SECTION */}
-      {extractedData && (
-        <div className="w-full max-w-2xl bg-white p-6 rounded-xl shadow-md mb-8">
-          <h2 className="text-2xl font-bold text-gray-800 mb-4">
-            📝 AI Analysis
-          </h2>
-          <div className="p-4 bg-blue-50 rounded-lg border border-blue-100 text-gray-800 whitespace-pre-wrap leading-relaxed">
-            {/* FIX: Use correct key from backend */}
-            {extractedData.ai_analysis}
-          </div>
+      {/* Feature Section */}
+      <section className="mt-32 grid md:grid-cols-3 gap-8 max-w-6xl mx-auto px-6 pb-20">
+        <div className="p-8 bg-blue-50 rounded-2xl">
+          <span className="text-4xl">📄</span>
+          <h3 className="text-xl font-bold mt-4 mb-2">AI Summary</h3>
+          <p className="text-slate-600">
+            Complex medical jargon translated into plain English you can
+            actually understand.
+          </p>
         </div>
-      )}
-
-      {/* 3. CHAT SECTION (PHASE 5) */}
-      {extractedData && (
-        <div className="w-full max-w-2xl bg-white p-6 rounded-xl shadow-md">
-          <h2 className="text-2xl font-bold text-gray-800 mb-4">
-            💬 Ask a Follow-up
-          </h2>
-
-          <div className="mb-4 h-64 overflow-y-auto border p-4 rounded bg-gray-50">
-            {chatHistory.length === 0 && (
-              <p className="text-gray-400 text-center italic">
-                Ask about your results...
-              </p>
-            )}
-            {chatHistory.map((msg, i) => (
-              <div
-                key={i}
-                className={`mb-2 p-3 rounded-lg max-w-[80%] ${msg.role === "user" ? "bg-blue-600 text-white ml-auto" : "bg-gray-200 text-gray-800"}`}
-              >
-                <strong>{msg.role === "user" ? "You" : "Medi-Link"}:</strong>{" "}
-                {msg.text}
-              </div>
-            ))}
-            {chatLoading && (
-              <p className="text-gray-500 text-sm animate-pulse">
-                AI is typing...
-              </p>
-            )}
-          </div>
-
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleChat()}
-              placeholder="Ex: Is my Hemoglobin too low?"
-              className="flex-1 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-black"
-            />
-            <button
-              onClick={handleChat}
-              className="bg-blue-900 text-white px-6 py-3 rounded-lg font-bold hover:bg-blue-800 transition"
-            >
-              Send
-            </button>
-          </div>
+        <div className="p-8 bg-blue-50 rounded-2xl">
+          <span className="text-4xl">🚩</span>
+          <h3 className="text-xl font-bold mt-4 mb-2">Flag Abnormalities</h3>
+          <p className="text-slate-600">
+            Instantly see which markers are outside of standard reference
+            ranges.
+          </p>
         </div>
-      )}
+        <div className="p-8 bg-blue-50 rounded-2xl">
+          <span className="text-4xl">💬</span>
+          <h3 className="text-xl font-bold mt-4 mb-2">Follow-up Chat</h3>
+          <p className="text-slate-600">
+            Ask the AI questions about your specific results anytime, 24/7.
+          </p>
+        </div>
+      </section>
+
+      <footer className="text-center py-10 text-slate-400 text-sm">
+        © 2024 Medi-Link AI. Not a replacement for professional medical advice.
+      </footer>
     </div>
   );
 }

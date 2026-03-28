@@ -1,76 +1,85 @@
+import uuid
+import os
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
 from sentence_transformers import SentenceTransformer
-import uuid
 
-# 1. Connect to Qdrant
+# 1. Connect to Qdrant (Using your specified port 6335)
 client = QdrantClient(host="localhost", port=6335)
 COLLECTION_NAME = "medical_knowledge"
 
-# 2. Load a lightweight AI Model (Hugging Face)
-print("Loading AI Model...")
-model = SentenceTransformer('all-mpnet-base-v2') # Standard, powerful model
+# 2. Load AI Model
+print("Loading AI Model (all-mpnet-base-v2)...")
+model = SentenceTransformer('all-mpnet-base-v2') 
 
-# 3. Define some "Medical Textbook" data
+# 3. Clinical Interpretations and Expert Logic (Numbers removed)
+# This data provides the "Why" and "What it means" for the AI.
 medical_facts = [
-    # === COMPLETE BLOOD COUNT (CBC) ===
-    "Hemoglobin (Hb): Normal range for men is 13.5-17.5 g/dL, women 12.0-15.5 g/dL. Low levels indicate anemia (iron deficiency, blood loss). High levels may indicate polycythemia or dehydration.",
-    "White Blood Cell Count (WBC): Normal range is 4.5 to 11.0 x 10^9/L. High levels (Leukocytosis) suggest infection, inflammation, or leukemia. Low levels (Leukopenia) suggest viral infection, bone marrow issues, or chemotherapy side effects.",
-    "Platelets (Plt): Normal range is 150,000 to 450,000 per microliter. Low levels (Thrombocytopenia) increase bleeding risk. High levels (Thrombocytosis) increase clotting risk.",
-    "Hematocrit (Hct): Normal range men 41-50%, women 36-44%. Measures the percentage of red blood cells. Low indicates anemia; high indicates dehydration or blood disorders.",
-    "Red Blood Cell Count (RBC): Normal range men 4.7-6.1 million/mcL, women 4.2-5.4 million/mcL. Carries oxygen. Low count suggests anemia; high count suggests lung disease or dehydration.",
+    # --- BLOOD COUNT INTERPRETATIONS ---
+    "CLINICAL NOTE (WBC): High White Blood Cell counts commonly indicate infection or inflammation; they may also be elevated due to corticosteroid use.",
+    "CLINICAL NOTE (RBC/HCT): Elevated Red Blood Cell count or Hematocrit is frequently a sign of mild dehydration. Increasing fluid intake is the primary lifestyle recommendation.",
+    "CLINICAL NOTE (RBC/HCT/HGB): Low levels of RBC, Hematocrit, or Hemoglobin are the primary clinical indicators of Anemia.",
+    "CLINICAL NOTE (MCV): High MCV suggests Macrocytic anemia (often Vit B12/Folate related); Low MCV suggests Microcytic anemia (often Iron related).",
+    "CLINICAL NOTE (Platelets): Elevated platelet counts may indicate iron deficiency or a reactive response to recent bleeding, injury, or infection.",
+    "CLINICAL NOTE (Absolute Lymphocytes): Low absolute lymphocyte counts can indicate significant illness, or be a side effect of specific medications and immunosuppressants.",
+    "CLINICAL NOTE (Absolute Monocytes): High levels may indicate chronic infection, autoimmune disorders, or specific hematological conditions.",
 
-    # === LIPID PANEL (CHOLESTEROL) ===
-    "Total Cholesterol: Normal is less than 200 mg/dL. 200-239 is borderline high. 240+ is high. High levels increase risk of heart disease and stroke.",
-    "LDL Cholesterol (Bad): Optimal is less than 100 mg/dL. 100-129 is near optimal. 160+ is high. Causes plaque buildup in arteries.",
-    "HDL Cholesterol (Good): Low is less than 40 mg/dL (men) or 50 mg/dL (women). High is 60+ mg/dL. Protects against heart disease.",
-    "Triglycerides: Normal is less than 150 mg/dL. High levels are linked to heart disease, obesity, and type 2 diabetes.",
+    # --- ELECTROLYTES & RENAL INTERPRETATIONS ---
+    "CLINICAL NOTE (Albumin): High albumin is a standard marker of dehydration. Low albumin usually occurs with edema (swelling) or poor nutritional intake.",
+    "CLINICAL NOTE (Anion Gap): A high anion gap is a clinical indicator of metabolic acidosis.",
+    "CLINICAL NOTE (Calcium): Severely high calcium is a critical heart risk finding as it can cause arrhythmias due to calcium movement from bones to the bloodstream.",
+    "CLINICAL NOTE (Potassium): High potassium (Hyperkalemia) is dangerous and requires urgent monitoring for cardiac safety.",
+    "CLINICAL NOTE (Creatinine): Creatinine reflects muscle mass. In patients with muscle-wasting conditions, low creatinine is expected and normal for their condition.",
 
-    # === KIDNEY FUNCTION ===
-    "Creatinine: Normal range 0.7-1.3 mg/dL (men), 0.6-1.1 mg/dL (women). A waste product filtered by kidneys. High levels indicate kidney dysfunction or blockage.",
-    "Blood Urea Nitrogen (BUN): Normal range 7-20 mg/dL. High levels suggest kidney injury, dehydration, or high protein diet. Low levels may indicate liver damage.",
-    "eGFR (Estimated Glomerular Filtration Rate): Normal is > 90. 60-89 is mild kidney loss. < 60 indicates kidney disease. Measures how well kidneys filter blood.",
+    # --- DUCHENNE & MUSCULAR DYSTROPHY SPECIAL LOGIC ---
+    "DUCHENNE SPECIAL NOTE (ALT/AST): In patients with Duchenne/MD, elevated ALT and AST are NORMAL and expected due to constant skeletal muscle breakdown. They should NOT be interpreted as liver disease.",
+    "DUCHENNE SPECIAL NOTE (CK): Creatine Kinase (CK) is expected to be chronically and massively elevated in Duchenne patients, reflecting ongoing skeletal muscle injury.",
+    "DUCHENNE SPECIAL NOTE (CO2): High CO2 in Duchenne can indicate respiratory acidosis (breathing issues); Low CO2 can indicate respiratory alkalosis or diarrhea.",
 
-    # === LIVER FUNCTION ===
-    "Alanine Aminotransferase (ALT): Normal range 7-56 U/L. An enzyme found in the liver. High levels indicate liver damage (hepatitis, alcohol abuse).",
-    "Aspartate Aminotransferase (AST): Normal range 10-40 U/L. High levels indicate damage to liver, heart, or muscle tissues.",
-    "Bilirubin: Normal range 0.1 to 1.2 mg/dL. High levels cause jaundice (yellow skin) and indicate liver disease or bile duct blockage.",
-    "Albumin: Normal range 3.4 to 5.4 g/dL. A protein made by the liver. Low levels indicate liver disease, kidney disease, or malnutrition.",
+    # --- LIVER & ENZYME INTERPRETATIONS ---
+    "CLINICAL NOTE (ALP): High Alkaline Phosphatase (ALP) is normal and expected in children and adolescents due to rapid bone growth during puberty.",
+    "CLINICAL NOTE (GGT/ALP): If GGT is normal but ALP is high, the elevation is likely originating from bone growth or skeletal issues, not the liver.",
+    "CLINICAL NOTE (Bilirubin): High bilirubin in adults may suggest liver obstruction, hepatitis, or the rapid breakdown of red blood cells (hemolysis).",
 
-    # === DIABETES & METABOLISM ===
-    "Fasting Blood Glucose: Normal is 70-99 mg/dL. 100-125 is Prediabetes. 126+ is Diabetes. Measures blood sugar levels.",
-    "Hemoglobin A1c (HbA1c): Normal is below 5.7%. 5.7-6.4% is Prediabetes. 6.5% or higher is Diabetes. Measures average blood sugar over past 3 months.",
-    "Potassium: Normal range 3.6-5.2 mmol/L. Critical for heart function. Low (Hypokalemia) causes muscle weakness/cramps. High (Hyperkalemia) causes dangerous heart rhythms.",
-    "Sodium: Normal range 135-145 mEq/L. High levels indicate dehydration or kidney issues. Low levels indicate water intoxication or heart failure.",
+    # --- LIPID & METABOLIC INTERPRETATIONS ---
+    "CLINICAL NOTE (LDL/HDL): High-Density Lipoprotein (HDL) is 'good' cholesterol; higher levels decrease heart disease risk. High LDL increases cardiovascular risk.",
+    "CLINICAL NOTE (Triglycerides): High triglycerides, especially with high cholesterol, serve as a marker for increased cardiovascular and metabolic risk.",
+    "CLINICAL NOTE (Glucose): A random (non-fasting) glucose result higher than 200 mg/dL is a primary indicator of potential diabetes.",
 
-    # === THYROID ===
-    "Thyroid Stimulating Hormone (TSH): Normal range 0.4 to 4.0 mIU/L. High TSH often means Hypothyroidism (slow thyroid). Low TSH often means Hyperthyroidism (fast thyroid).",
-    "Free T4 (Thyroxine): Normal range 0.8 to 1.8 ng/dL. Works with TSH to diagnose thyroid issues."
+    # --- IRON & ENDOCRINE INTERPRETATIONS ---
+    "CLINICAL NOTE (Transferrin/Iron): Low transferrin levels typically indicate a lack of stored iron in the body (Iron deficiency).",
+    "CLINICAL NOTE (Vitamin D): Low Vitamin D (25 OH Vit D) indicates insufficient stores, common in patients with limited sunlight or poor absorption.",
+    "CLINICAL NOTE (Testosterone): Low testosterone in young males can be a secondary side effect of long-term corticosteroid use (common in MD treatment).",
+    "CLINICAL NOTE (IGF-1): Low IGF-1 levels relative to age and Tanner Stage may suggest a growth hormone deficiency."
 ]
 
-
 def seed_db():
-    # Re-create collection to start fresh
+    print(f"Clearing and re-initializing collection '{COLLECTION_NAME}'...")
+    
+    # Re-create collection to ensure clean state
     client.recreate_collection(
         collection_name=COLLECTION_NAME,
         vectors_config=VectorParams(size=768, distance=Distance.COSINE),
     )
 
     points = []
-    print("Vectorizing data...")
+    print(f"Vectorizing {len(medical_facts)} clinical interpretations...")
     
-    # Loop through facts, turn them into numbers, and prepare for DB
     for fact in medical_facts:
         vector = model.encode(fact).tolist()
         points.append(PointStruct(
             id=str(uuid.uuid4()),
             vector=vector,
-            payload={"text": fact, "type": "medical_guideline"}
+            payload={
+                "text": fact, 
+                "category": "clinical_interpretation",
+                "source": "Mayo Clinic / PPMD Logic"
+            }
         ))
 
-    # Upload to Qdrant
+    # Upload in one batch
     client.upsert(collection_name=COLLECTION_NAME, points=points)
-    print(f"Success! {len(points)} medical facts inserted into Qdrant.")
+    print(f"✅ Success! {len(points)} clinical facts inserted into Qdrant.")
 
 if __name__ == "__main__":
     seed_db()
