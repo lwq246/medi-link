@@ -3,13 +3,13 @@ import uuid
 import shutil
 import base64
 import traceback
-import fitz # PyMuPDF
-from typing import List
+import fitz 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from dotenv import load_dotenv
-
+import redis
+import hashlib
+import re
 # Vector DB & AI
 from qdrant_client import QdrantClient, models
 from qdrant_client.models import VectorParams, Distance, PointStruct
@@ -21,7 +21,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # Import your AI Agents
 from medical_service import analyze_patient_report, answer_medical_question
-
+from schemas import ChatRequest
 # 1. LOAD ENVIRONMENT & CONFIG
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -34,7 +34,7 @@ qdrant = QdrantClient(host="localhost", port=6335)
 security = HTTPBearer()
 
 print("Loading AI Embedding Model...")
-embed_model = SentenceTransformer('all-mpnet-base-v2')
+embed_model = SentenceTransformer('NeuML/pubmedbert-base-embeddings')
 
 # 3. MIDDLEWARE
 app.add_middleware(
@@ -45,10 +45,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 4. DATA MODELS
-class ChatRequest(BaseModel):
-    question: str
-    report_id: str
+# decode_responses=True makes it return strings instead of bytes
+redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
+# Helper function to create a unique key for the question
+def get_cache_key(report_id, question):
+    # 1. Lowercase
+    q = question.strip().lower()
+    # 2. Remove all punctuation (marks, commas, etc)
+    q = re.sub(r'[^\w\s]', '', q)
+    # 3. Collapse extra spaces
+    q = " ".join(q.split())
+    
+    combined = f"{report_id}:{q}"
+    return f"chat_cache:{hashlib.md5(combined.encode()).hexdigest()}"
 
 # 5. AUTH DEPENDENCY
 def get_current_user(authorization: HTTPAuthorizationCredentials = Depends(security)):
@@ -78,7 +88,6 @@ def startup_db():
     ensure_collection(KNOWLEDGE_COLLECTION)
 
 # 7. ROUTES
-
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...), user_id: str = Depends(get_current_user)):
     temp_path = f"temp_{uuid.uuid4()}_{file.filename}"
@@ -192,8 +201,6 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Depends(g
         ))
 
         # 7. Clear previous data for this specific user/report and Upsert new granular points
-        # Note: If you want to keep multiple reports searchable at once, 
-        # remove the qdrant.delete call or filter it by report_id.
         qdrant.upsert(collection_name=PATIENT_COLLECTION, points=qdrant_points)
 
         return db_res.data[0]
@@ -210,9 +217,17 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Depends(g
 
 @app.post("/chat")
 async def chat_with_report(request: ChatRequest, user_id: str = Depends(get_current_user)):
-    question_vector = embed_model.encode(request.question).tolist()
+    # --- REDIS STEP: Check Cache ---
+    cache_key = get_cache_key(request.report_id, request.question)
+    cached_answer = redis_client.get(cache_key)
     
-    # Search finds the most relevant individual markers now!
+    if cached_answer:
+        print("🚀 [Redis] Serving answer from cache!")
+        return {"answer": cached_answer}
+
+    # --- Standard logic if NOT in cache ---
+    # 1. Vector Search
+    question_vector = embed_model.encode(request.question).tolist()
     patient_res = qdrant.query_points(
         collection_name=PATIENT_COLLECTION,
         query=question_vector,
@@ -222,25 +237,27 @@ async def chat_with_report(request: ChatRequest, user_id: str = Depends(get_curr
                 models.FieldCondition(key="report_id", match=models.MatchValue(value=request.report_id))
             ]
         ),
-        limit=10 # Higher limit to catch multiple related markers
+        limit=10
     ).points
     
-    medical_res = qdrant.query_points(KNOWLEDGE_COLLECTION, query=question_vector, limit=5).points
-    
-    context_str = "--- RELEVANT DATA ---\n" + "\n".join([h.payload['text'] for h in patient_res])
-    context_str += "\n\n--- CLINICAL GUIDELINES ---\n" + "\n".join([h.payload['text'] for h in medical_res])
+    context_str = "--- REPORT DATA ---\n" + "\n".join([h.payload['text'] for h in patient_res])
     
     try:
+        # 2. Call AI
         answer = answer_medical_question(request.question, context_str)
+        
+        # --- REDIS STEP: Save to Cache ---
+        # We store the answer for 1 hour (3600 seconds)
+        redis_client.setex(cache_key, 3600, answer)
+        print("💾 [Redis] Answer saved to cache.")
+
+        # 3. Save to Supabase (History)
         chat_logs = [
             {"report_id": request.report_id, "user_id": user_id, "role": "user", "content": request.question},
             {"report_id": request.report_id, "user_id": user_id, "role": "bot", "content": answer}
         ]
         supabase.table("chat_messages").insert(chat_logs).execute()
+        
         return {"answer": answer}
     except Exception as e:
-        return {"answer": "I'm sorry, I'm having trouble connecting."}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        return {"answer": "Error connecting."}

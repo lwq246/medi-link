@@ -9,8 +9,8 @@ client = QdrantClient(host="localhost", port=6335)
 COLLECTION_NAME = "medical_knowledge"
 
 # 2. Load AI Model
-print("Loading AI Model (all-mpnet-base-v2)...")
-model = SentenceTransformer('all-mpnet-base-v2') 
+print("Loading AI Model (NeuML/pubmedbert-base-embeddings)...")
+model = SentenceTransformer('NeuML/pubmedbert-base-embeddings') 
 
 # 3. Clinical Interpretations and Expert Logic (Numbers removed)
 # This data provides the "Why" and "What it means" for the AI.

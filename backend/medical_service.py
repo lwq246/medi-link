@@ -1,13 +1,11 @@
 import os
 import json
 import re
-import base64
-from typing import TypedDict, List, Optional, Union
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 from langgraph.graph import StateGraph, END
 import google.generativeai as genai
-
+from schemas import AgentState, LabMarker
 # Load environment variables
 load_dotenv()
 
@@ -21,23 +19,6 @@ hf_client = InferenceClient(api_key=TOKEN)
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 gemini_model = genai.GenerativeModel('gemini-2.5-flash')
 
-# --- STATE DEFINITION ---
-class LabMarker(TypedDict):
-    name: str
-    value: Optional[float]
-    min_range: Optional[float]
-    max_range: Optional[float]
-    unit: str
-    status: Optional[str]
-
-class AgentState(TypedDict):
-    image_base64: str       
-    medical_context: str    
-    structured_data: List[LabMarker]
-    report_metadata: dict      # <--- ADD THIS
-    final_report: str
-
-# --- UTILS ---
 def clean_to_float(value):
     if value is None: return None
     try:
