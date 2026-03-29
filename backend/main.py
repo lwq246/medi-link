@@ -83,18 +83,20 @@ def startup_db():
 async def upload_document(file: UploadFile = File(...), user_id: str = Depends(get_current_user)):
     temp_path = f"temp_{uuid.uuid4()}_{file.filename}"
     img_path = None
+    
+    # Ensure collection exists
     ensure_collection(PATIENT_COLLECTION)
 
     try:
-        # Save file locally
+        # Save file locally for processing
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # 1. Convert to Image for Vision
+        # 1. Convert to Image for Gemini Vision
         if file.filename.lower().endswith('.pdf'):
             doc = fitz.open(temp_path)
             page = doc.load_page(0)
-            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) # Balanced resolution
+            pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) 
             img_path = temp_path + ".jpg"
             pix.save(img_path)
             doc.close()
@@ -104,63 +106,94 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Depends(g
         with open(img_path, "rb") as image_file:
             base64_image = base64.b64encode(image_file.read()).decode('utf-8')
 
-        # 2. Upload to Supabase Storage
+        # 2. Upload Original File to Supabase Storage
         storage_path = f"{user_id}/{uuid.uuid4()}_{file.filename}"
         with open(temp_path, "rb") as f:
             supabase.storage.from_("medical-reports").upload(storage_path, f)
 
-        # 3. Pull Knowledge Base context
+        # 3. Pull Clinical Interpretations from Knowledge Base
+        ensure_collection(KNOWLEDGE_COLLECTION)
         search_res = qdrant.query_points(KNOWLEDGE_COLLECTION, query=[0]*768, limit=10).points
         rag_context = "\n".join([hit.payload['text'] for hit in search_res])
 
-        # 4. Run LangGraph (Returns Report Text AND Structured Data)
+        # 4. Run LangGraph Multi-Agent Analysis
         print(f"Starting Multi-Agent Analysis for User {user_id}...")
-        final_analysis, structured_markers = analyze_patient_report(base64_image, rag_context)
+        final_analysis, structured_markers, report_metadata = analyze_patient_report(base64_image, rag_context)
 
-        # 5. Save to Supabase DB
+        # 5. Save to Supabase Database (History)
         report_data = {
-            "user_id": user_id, "filename": file.filename,
-            "ai_analysis": final_analysis, "file_url": storage_path
+            "user_id": user_id, 
+            "filename": file.filename,
+            "ai_analysis": final_analysis, 
+            "file_url": storage_path
         }
         db_res = supabase.table("reports").insert(report_data).execute()
         report_id = db_res.data[0]['id']
 
-        # 6. --- NEW: GRANULAR QDRANT PERSISTENCE ---
+        # 6. --- HIGH-PRECISION GRANULAR QDRANT PERSISTENCE ---
         qdrant_points = []
 
-        # A. Store the Final Summary text
-        qdrant_points.append(PointStruct(
-            id=str(uuid.uuid4()), 
-            vector=embed_model.encode(final_analysis).tolist(),
-            payload={
-                "user_id": user_id, 
-                "report_id": report_id, 
-                "text": f"AI Summary: {final_analysis}",
-                "type": "summary"
-            }
-        ))
+        # A. Create individual points for each piece of Metadata
+        # This allows direct hits on questions like "Who is the doctor?" or "What is the date?"
+        meta_mapping = {
+            "collected_date": "The collection date of this medical report is",
+            "doctor": "The referring or verifying doctor for this report is",
+            "uhid": "The patient hospital ID (UHID) for this report is",
+            "specimen": "The specimen type used for this report is",
+            "name": "The patient name on this medical report is"
+        }
 
-        # B. Store every individual marker as a separate searchable point
+        for key, prefix in meta_mapping.items():
+            val = report_metadata.get(key)
+            if val and str(val).lower() != "null":
+                fact_text = f"{prefix} {val}."
+                qdrant_points.append(PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=embed_model.encode(fact_text).tolist(),
+                    payload={
+                        "user_id": user_id,
+                        "report_id": report_id,
+                        "text": fact_text,
+                        "type": "metadata",
+                        "meta_field": key
+                    }
+                ))
+
+        # B. Create individual points for every Lab Marker
         for marker in structured_markers:
-            # Create a clean string for the vector engine to index
-            marker_string = (
+            marker_text = (
                 f"Marker: {marker.get('name')}, Result: {marker.get('value')} {marker.get('unit')}, "
-                f"Range: {marker.get('min_range')}-{marker.get('max_range')}, Status: {marker.get('status')}"
+                f"Reference Range: {marker.get('min_range')}-{marker.get('max_range')}, "
+                f"Status: {marker.get('status')}."
             )
-            
             qdrant_points.append(PointStruct(
                 id=str(uuid.uuid4()),
-                vector=embed_model.encode(marker_string).tolist(),
+                vector=embed_model.encode(marker_text).tolist(),
                 payload={
                     "user_id": user_id,
                     "report_id": report_id,
-                    "text": marker_string,
+                    "text": marker_text,
                     "type": "marker_data",
                     "marker_name": marker.get('name')
                 }
             ))
 
-        # Upload all individual points at once
+        # C. Create a point for the Final AI Summary
+        summary_point_text = f"Overall AI Clinical Interpretation Summary: {final_analysis}"
+        qdrant_points.append(PointStruct(
+            id=str(uuid.uuid4()),
+            vector=embed_model.encode(summary_point_text).tolist(),
+            payload={
+                "user_id": user_id,
+                "report_id": report_id,
+                "text": summary_point_text,
+                "type": "summary"
+            }
+        ))
+
+        # 7. Clear previous data for this specific user/report and Upsert new granular points
+        # Note: If you want to keep multiple reports searchable at once, 
+        # remove the qdrant.delete call or filter it by report_id.
         qdrant.upsert(collection_name=PATIENT_COLLECTION, points=qdrant_points)
 
         return db_res.data[0]
@@ -170,6 +203,7 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Depends(g
         traceback.print_exc() 
         raise HTTPException(status_code=500, detail=str(e))
     finally:
+        # Cleanup temporary files
         if os.path.exists(temp_path): os.remove(temp_path)
         if img_path and os.path.exists(img_path) and img_path != temp_path:
             os.remove(img_path)
@@ -188,7 +222,7 @@ async def chat_with_report(request: ChatRequest, user_id: str = Depends(get_curr
                 models.FieldCondition(key="report_id", match=models.MatchValue(value=request.report_id))
             ]
         ),
-        limit=5 # Higher limit to catch multiple related markers
+        limit=10 # Higher limit to catch multiple related markers
     ).points
     
     medical_res = qdrant.query_points(KNOWLEDGE_COLLECTION, query=question_vector, limit=5).points

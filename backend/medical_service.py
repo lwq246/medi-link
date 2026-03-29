@@ -34,6 +34,7 @@ class AgentState(TypedDict):
     image_base64: str       
     medical_context: str    
     structured_data: List[LabMarker]
+    report_metadata: dict      # <--- ADD THIS
     final_report: str
 
 # --- UTILS ---
@@ -47,37 +48,31 @@ def clean_to_float(value):
 
 # --- NODE 1: THE VISION EXTRACTOR (GEMINI) ---
 def vision_extractor_node(state: AgentState):
-    print("--- Agent 1: Gemini Vision Extraction (Stable) ---")
+    print("--- Agent 1: Gemini Vision Extraction (Markers + Metadata) ---")
     
     prompt = (
-        "Extract every lab marker from this medical report image into a JSON object.\n"
-        "FIELDS: 'name', 'value', 'min_range', 'max_range', and 'unit'.\n"
-        "RULES:\n"
-        "1. Provide ONLY pure numbers for value and ranges.\n"
-        "2. If a range is '< 1.2', set min_range to 0 and max_range to 1.2.\n"
-        "3. Output ONLY valid JSON in this format: {\"markers\": [{\"name\": \"...\", \"value\": 10.5, ...}]}"
+        "Analyze this medical report image. Extract TWO JSON objects:\n"
+        "1. 'metadata': Extract 'name', 'uhid', 'doctor', 'specimen', and 'collected_date'. Use null if missing.\n"
+        "2. 'markers': Extract every lab test into a list with 'name', 'value', 'min_range', 'max_range', and 'unit'.\n"
+        "Format: {\"metadata\": {...}, \"markers\": [...]}"
     )
 
     try:
-        # Gemini handles Base64 images directly
         response = gemini_model.generate_content([
             prompt,
             {'mime_type': 'image/jpeg', 'data': state['image_base64']}
         ])
         
-        # Clean markdown if Gemini adds it
-        raw_text = response.text
-        clean_json = re.sub(r"```json\n|\n```", "", raw_text).strip()
-        data = json.loads(clean_json)
+        data = json.loads(re.sub(r"```json\n|\n```", "", response.text).strip())
         
-        extracted = data.get("markers", [])
-        print(f"Successfully extracted {len(extracted)} markers via Gemini.")
-        return {"structured_data": extracted}
-        
+        # We return the new metadata along with the markers
+        return {
+            "structured_data": data.get("markers", []),
+            "report_metadata": data.get("metadata", {}) # <--- CAPTURE METADATA
+        }
     except Exception as e:
-        print(f"❌ Gemini Vision Error: {e}")
-        return {"structured_data": []}
-
+        print(f"❌ Vision Error: {e}")
+        return {"structured_data": [], "report_metadata": {}}
 # --- NODE 2: THE AUDITOR (PYTHON CODE) ---
 def auditor_node(state: AgentState):
     print("--- Agent 2: Deterministic Math Audit ---")
@@ -151,10 +146,12 @@ def analyze_patient_report(image_base64, medical_context):
         "image_base64": image_base64,
         "medical_context": medical_context,
         "structured_data": [],
+        "report_metadata": {}, # <--- Initialize empty
         "final_report": ""
     })
-    # CHANGE THIS: Return both the text and the markers list
-    return result["final_report"], result["structured_data"]
+    
+    # CRUCIAL: Must return exactly 3 items to match main.py
+    return result["final_report"], result["structured_data"], result["report_metadata"]
 
 def answer_medical_question(question, context):
     """Triggered by the FastAPI /chat route"""
