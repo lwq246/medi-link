@@ -13,7 +13,7 @@ if not TOKEN:
 
 # 2. Init client
 client = InferenceClient(api_key=TOKEN)
-MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
 
 def get_safe_output(msg):
     """

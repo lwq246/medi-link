@@ -11,7 +11,7 @@ class LabMarker(TypedDict):
     unit: str
     status: Optional[str]
 
-# The shared state for your LangGraph
+# Shared structures for report analysis responses
 class AgentState(TypedDict):
     image_base64: str       
     medical_context: str    

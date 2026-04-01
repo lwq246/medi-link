@@ -101,7 +101,7 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Depends(g
         with open(temp_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # 1. Convert to Image for Gemini Vision
+        # 1. Convert to image for Qwen3-VL analysis
         if file.filename.lower().endswith('.pdf'):
             doc = fitz.open(temp_path)
             page = doc.load_page(0)
@@ -125,8 +125,8 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Depends(g
         search_res = qdrant.query_points(KNOWLEDGE_COLLECTION, query=[0]*768, limit=10).points
         rag_context = "\n".join([hit.payload['text'] for hit in search_res])
 
-        # 4. Run LangGraph Multi-Agent Analysis
-        print(f"Starting Multi-Agent Analysis for User {user_id}...")
+        # 4. Run single-model Qwen analysis
+        print(f"Starting Qwen3-VL Analysis for User {user_id}...")
         final_analysis, structured_markers, report_metadata = analyze_patient_report(base64_image, rag_context)
 
         # 5. Save to Supabase Database (History)
